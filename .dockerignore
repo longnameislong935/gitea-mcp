@@ -1,0 +1,16 @@
+.git
+.github
+.githooks
+.tackbox
+.venv
+dist
+*.egg-info
+__pycache__
+.pytest_cache
+.slices
+.wt
+tests
+docs
+.gitignore
+Dockerfile
+.dockerignore
