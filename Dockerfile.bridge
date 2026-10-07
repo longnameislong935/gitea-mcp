@@ -1,13 +1,18 @@
-# Prebuilt Gitea MCP bridge: supergateway + gitea-mcp (Python) baked in.
-# Mirrors the opnsense-mcp-bridge pattern, but gitea-mcp is a Python package,
-# so this image carries both Node (supergateway) and Python (gitea-mcp).
+# Gitea MCP bridge with REAL inbound auth.
 #
-# supergateway runs gitea-mcp as a stdio child and bridges it to streamable-HTTP
-# at :8000/mcp, requiring an inbound bearer (--oauth2Bearer $MCP_BEARER_TOKEN).
+# supergateway has no inbound-auth feature: --oauth2Bearer only *injects* an
+# Authorization header (and leaks it in responses). So a tiny Caddy listener fronts
+# supergateway and REQUIRES `Authorization: Bearer $MCP_BEARER_TOKEN` (else 401),
+# reverse-proxying to supergateway on loopback. True static bearer, no token leak.
+#
+#   Caddy        :8000  (public; enforces Bearer; streams SSE)
+#   supergateway :8001  (loopback; stdio child = gitea-mcp, Python)
 #
 # Build & push (GHCR, lowercase owner):
-#   docker build -f Dockerfile.bridge -t ghcr.io/longnameislong935/gitea-mcp-bridge:0.0.1 .
-#   docker push ghcr.io/longnameislong935/gitea-mcp-bridge:0.0.1
+#   docker build -f Dockerfile.bridge -t ghcr.io/longnameislong935/gitea-mcp-bridge:0.0.3 .
+#   docker push ghcr.io/longnameislong935/gitea-mcp-bridge:0.0.3
+
+FROM caddy:2-alpine AS caddybin
 
 FROM node:20-slim
 
@@ -16,6 +21,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-pip pipx ca-certificates \
     && npm install -g supergateway && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/*
+
+# Static Caddy binary (CGO-free) — runs fine on Debian slim.
+COPY --from=caddybin /usr/bin/caddy /usr/bin/caddy
 
 # Install gitea-mcp from its published simple index into an isolated venv,
 # exposing the `gitea-mcp` console script on PATH.
@@ -26,14 +34,39 @@ ENV PIPX_HOME=/opt/pipx \
 RUN pipx install --pip-args "--extra-index-url https://nikitatsym.github.io/gitea-mcp/simple" gitea-mcp \
     && chmod -R a+rX /opt/pipx /usr/local/bin
 
+# Caddy config: 401 unless the request carries the exact bearer; else proxy to
+# supergateway. {$MCP_BEARER_TOKEN} is expanded from the env at config load.
+RUN printf '%s\n' \
+  '{' \
+  '    admin off' \
+  '    auto_https off' \
+  '    persist_config off' \
+  '}' \
+  ':8000 {' \
+  '    @noauth not header Authorization "Bearer {$MCP_BEARER_TOKEN}"' \
+  '    respond @noauth 401' \
+  '    reverse_proxy 127.0.0.1:8001 {' \
+  '        flush_interval -1' \
+  '    }' \
+  '}' > /etc/caddy/Caddyfile
+
+# Start both; if either exits, tear down and fail so k8s restarts the pod.
+# gitea-mcp (stdio child) reads GITEA_URL + GITEA_TOKEN from env.
+RUN printf '%s\n' \
+  '#!/bin/sh' \
+  'set -e' \
+  'supergateway \' \
+  '  --stdio "gitea-mcp" \' \
+  '  --outputTransport streamableHttp \' \
+  '  --port 8001 \' \
+  '  --streamableHttpPath /mcp & SG=$!' \
+  'caddy run --config /etc/caddy/Caddyfile --adapter caddyfile & CD=$!' \
+  'while kill -0 "$SG" 2>/dev/null && kill -0 "$CD" 2>/dev/null; do sleep 2; done' \
+  'kill "$SG" "$CD" 2>/dev/null || true' \
+  'exit 1' \
+  > /start.sh && chmod +x /start.sh
+
+ENV XDG_DATA_HOME=/tmp XDG_CONFIG_HOME=/tmp
 USER 1000:1000
 EXPOSE 8000
-
-# gitea-mcp (stdio child) reads GITEA_URL + GITEA_TOKEN from env.
-# supergateway reads MCP_BEARER_TOKEN and enforces it on inbound /mcp clients.
-ENTRYPOINT ["/bin/sh", "-c", "exec supergateway \
-  --stdio 'gitea-mcp' \
-  --outputTransport streamableHttp \
-  --port 8000 \
-  --streamableHttpPath /mcp \
-  --oauth2Bearer \"$MCP_BEARER_TOKEN\""]
+ENTRYPOINT ["/start.sh"]
