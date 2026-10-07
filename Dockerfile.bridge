@@ -9,8 +9,8 @@
 #   supergateway :8001  (loopback; stdio child = gitea-mcp, Python)
 #
 # Build & push (GHCR, lowercase owner):
-#   docker build -f Dockerfile.bridge -t ghcr.io/longnameislong935/gitea-mcp-bridge:0.0.3 .
-#   docker push ghcr.io/longnameislong935/gitea-mcp-bridge:0.0.3
+#   docker build -f Dockerfile.bridge -t ghcr.io/longnameislong935/gitea-mcp-bridge:0.0.4 .
+#   docker push ghcr.io/longnameislong935/gitea-mcp-bridge:0.0.4
 
 FROM caddy:2-alpine AS caddybin
 
@@ -23,7 +23,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Static Caddy binary (CGO-free) — runs fine on Debian slim.
-COPY --from=caddybin /usr/bin/caddy /usr/bin/caddy
+COPY --from=caddybin /usr/bin/caddy /tmp/caddy
+RUN cp /tmp/caddy /usr/bin/caddy && rm /tmp/caddy && chmod 0755 /usr/bin/caddy
 
 # Install gitea-mcp from its published simple index into an isolated venv,
 # exposing the `gitea-mcp` console script on PATH.
